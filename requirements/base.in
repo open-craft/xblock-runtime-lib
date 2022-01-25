@@ -6,4 +6,5 @@ django-model-utils
 edx-opaque-keys[django]
 edx-django-utils>=4.0.0
 markupsafe==2.0.1
+web-fragments==2.0.0
 XBlock>=1.5.0

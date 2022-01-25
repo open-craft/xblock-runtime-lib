@@ -14,19 +14,39 @@ django==3.2.11
     # via
     #   -c requirements/constraints.txt
     #   -r requirements/base.in
+    #   django-crum
     #   django-model-utils
+    #   edx-django-utils
+django-crum==0.7.9
+    # via edx-django-utils
 django-model-utils==4.2.0
+    # via -r requirements/base.in
+django-waffle==2.3.0
+    # via edx-django-utils
+edx-django-utils==4.4.2
+    # via -r requirements/base.in
+edx-opaque-keys[django]==2.2.2
     # via -r requirements/base.in
 fs==2.4.14
     # via xblock
 lxml==4.7.1
     # via xblock
 markupsafe==2.0.1
-    # via xblock
+    # via
+    #   -r requirements/base.in
+    #   xblock
+newrelic==7.4.0.172
+    # via edx-django-utils
+pbr==5.8.0
+    # via stevedore
 pep517==0.12.0
     # via pip-tools
 pip-tools==6.4.0
     # via -r requirements/dev.in
+psutil==5.9.0
+    # via edx-django-utils
+pymongo==4.0.1
+    # via edx-opaque-keys
 python-dateutil==2.8.2
     # via xblock
 pytz==2021.3
@@ -42,10 +62,16 @@ six==1.16.0
     #   python-dateutil
 sqlparse==0.4.2
     # via django
+stevedore==3.5.0
+    # via
+    #   edx-django-utils
+    #   edx-opaque-keys
 tomli==2.0.0
     # via pep517
 web-fragments==2.0.0
-    # via xblock
+    # via
+    #   -r requirements/base.in
+    #   xblock
 webob==1.8.7
     # via xblock
 wheel==0.37.1

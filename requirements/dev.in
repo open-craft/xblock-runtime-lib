@@ -1,0 +1,6 @@
+# Additional requirements for development of this application
+-c constraints.txt
+
+-r base.in                # Dependencies for edx-completion itself
+
+pip-tools                 # Requirements file management

@@ -1,0 +1,6 @@
+include CHANGELOG.rst
+include LICENSE
+include README.rst
+include requirements/base.in
+recursive-include xblock_runtime_lib *.html *.png *.gif *js *.css *jpg *jpeg *svg *py
+include requirements/constraints.txt

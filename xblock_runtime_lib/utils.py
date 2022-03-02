@@ -1,92 +1,120 @@
 """
-Various utility functions related to XBlocks.
+Utility functions for the Blocks app.
 
 With code from:
 
-    https://github.com/openedx/edx-platform/blob/9514cb57/openedx/core/lib/xblock_utils/__init__.py
-    https://github.com/openedx/edx-platform/blob/9514cb57/openedx/core/djangoapps/common_views/xblock.py
-    https://github.com/openedx/edx-platform/blob/9514cb57/common/djangoapps/static_replace/__init__.py
+    https://github.com/openedx/edx-platform/blob/4752ed/openedx/core/djangoapps/xblock/utils.py
 """
-
-
-import logging
-import mimetypes
+import hmac
+import math
 import re
+import time
+from uuid import uuid4
 
+import crum
 from django.conf import settings
-from django.http import Http404, HttpResponse
-from django.urls import reverse
-from web_fragments.fragment import Fragment
-from xblock.core import XBlock
-from xblock.plugin import default_select
-
-log = logging.getLogger(__name__)
-
-XBLOCK_STATIC_RESOURCE_PREFIX = '/static/xblock'
+from django.contrib.auth import get_user_model
+from rest_framework.reverse import reverse as drf_reverse
 
 
-def wrap_fragment(fragment, new_content):
+User = get_user_model()
+
+
+# TODO: upstream have fixed a bug with this token generation, see https://github.com/openedx/edx-platform/pull/26224
+# Incorporate this fix and determine a roll-out strategy that doesn't disrupt learners.
+def get_secure_hash_for_xblock_handler(username: str, block_key_str: str, time_idx: int = 0):
     """
-    Returns a new Fragment that has `new_content` and all
-    as its content, and all of the resources from fragment
+    Get a secure token (one-way hash) used kind of like a CSRF token
+    to ensure that only authorized XBlock code in an IFrame we created
+    is calling the secure_xblock_handler endpoint.
+
+    For security, we need these hashes to have an expiration date. So:
+    the hash incorporates the current time, rounded to the lowest TOKEN_PERIOD
+    value. When checking this, you should check both time_idx=0 and time_idx=-1
+    in case we just recently moved from one time period to another (i.e. at the
+    stroke of midnight UTC or similar)
     """
-    wrapper_frag = Fragment(content=new_content)
-    wrapper_frag.add_fragment_resources(fragment)
-    return wrapper_frag
+    TOKEN_PERIOD = 24 * 60 * 60 * 2  # These URLs are valid for 2-4 days
+    time_token = math.floor(time.time() / TOKEN_PERIOD)
+    time_token += TOKEN_PERIOD * time_idx
+    check_string = str(time_token) + ':' + username + ':' + block_key_str
+    secure_key = hmac.new(settings.SECRET_KEY.encode('utf-8'), check_string.encode('utf-8'), 'blake2b').hexdigest()
+    return secure_key[:20]
 
 
-def xblock_resource(request, block_type, uri):
+def get_secure_xblock_handler_url(request, block_key_str: str, handler_name: str) -> str:
     """
-    Return a package resource for the specified XBlock.
+    Get an absolute URL that an XBlock can call, without any session cookies,
+    to invoke the specified handler.
     """
-    try:
-        # Figure out what the XBlock class is from the block type, and
-        # then open whatever resource has been requested.
-        xblock_class = XBlock.load_class(block_type, select=default_select)
-        content = xblock_class.open_local_resource(uri)
-    except OSError:
-        log.info('Failed to load xblock resource', exc_info=True)
-        raise Http404
-    except Exception:
-        log.error('Failed to load xblock resource', exc_info=True)
-        raise Http404
-
-    mimetype, _ = mimetypes.guess_type(uri)
-    return HttpResponse(content, content_type=mimetype)
+    username = request.user.username
+    secure_key = get_secure_hash_for_xblock_handler(username, block_key_str)
+    return drf_reverse('api:v1:xblocks-secure-handler', request=request, kwargs={
+        'pk': block_key_str,
+        'username': username,
+        'secure_key': secure_key,
+        'handler_name': handler_name,
+    })
 
 
-def process_static_urls(text, replacement_function, data_dir=None):
+def rewrite_blockstore_runtime_handler_urls(html: str, request) -> str:
     """
-    Run an arbitrary replacement function on any urls matching the static file
-    directory
+    Replace references to handler urls with versions proxied through the LX backend.
+
+    Some XBlocks like video and problem do not always create handler URLs using the prefix
+    provided by the frontend runtime but instead create them in the backend and include in
+    the student_view html. Se we search for any in the html content of the student view and
+    swap them.
     """
-    def wrap_part_extraction(match):
-        """
-        Unwraps a match group for the captures specified in _url_replace_regex
-        and forward them on as function arguments
-        """
-        original = match.group(0)
-        prefix = match.group('prefix')
-        quote = match.group('quote')
-        rest = match.group('rest')
-
-        # Don't rewrite XBlock resource links.  Probably wasn't a good idea that /static
-        # works for actual static assets and for magical course asset URLs....
-        full_url = prefix + rest
-
-        starts_with_static_url = full_url.startswith(str(settings.STATIC_URL))
-        starts_with_prefix = full_url.startswith(XBLOCK_STATIC_RESOURCE_PREFIX)
-        contains_prefix = XBLOCK_STATIC_RESOURCE_PREFIX in full_url
-        if starts_with_prefix or (starts_with_static_url and contains_prefix):
-            return original
-
-        return replacement_function(original, prefix, quote, rest)
-
-    return re.sub(
-        _url_replace_regex('(?:{static_url}|/static/)(?!{data_dir})'.format(
-            static_url=settings.STATIC_URL,
-            data_dir=data_dir
-        )),
-        wrap_part_extraction,
-        text
+    handler_url_pattern = (
+        # This regex will match handler URL patterns amid html like:
+        # href=\"/api/xblock/v2/xblocks/.../handler/download\"
+        # &#34;/api/xblock/v2/xblocks/.../handler/publish_completion&#34;
+        # "\\/api\\/xblock\\/v2\\/xblocks\\/...\\/handler\\/publish_completion"
+        # pylint: disable=line-too-long
+        rf'{settings.LMS_ROOT_PUBLIC}/api/xblock/v2/xblocks/(?P<block_id>[^/"\']+)/handler/(?P<user_id>\w+)-(?P<secure_token>\w+)/(?P<handler_name>[\w\-]+)'
     )
+
+    def get_secure_xblock_handler_url_for_match(match):
+        """ Get handler_url for match in html. """
+        new_url = get_secure_xblock_handler_url(
+            request=request,
+            block_key_str=match.group('block_id'),
+            handler_name=match.group('handler_name')
+        )
+        return new_url
+
+    html = re.sub(handler_url_pattern, get_secure_xblock_handler_url_for_match, html)
+
+    # Make sure the regex is catching all variants otherwise we will lose data.
+    assert f'{settings.LMS_ROOT_PUBLIC}/api/xblock/v2/xblocks/' not in html
+
+    return html
+
+
+def get_xblock_id_for_anonymous_user(user):
+    """
+    Get a unique string that identifies the current anonymous (not logged in)
+    user. (This is different than the "anonymous user ID", which is an
+    anonymized identifier for a logged in user.)
+    Note that this ID is a string, not an int. It is guaranteed to be in a
+    unique namespace that won't collide with "normal" user IDs, even when
+    they are converted to a string.
+    """
+    if not user or not user.is_anonymous:
+        raise TypeError("get_xblock_id_for_anonymous_user() is only for anonymous (not logged in) users.")
+    if hasattr(user, 'xblock_id_for_anonymous_user'):
+        # If code elsewhere (like the xblock_handler API endpoint) has stored
+        # the key on the AnonymousUser object, just return that - it supersedes
+        # everything else:
+        return user.xblock_id_for_anonymous_user
+    # We use the session to track (and create if needed) a unique ID for this anonymous user:
+    current_request = crum.get_current_request()
+    if current_request and current_request.session:
+        # Make sure we have a key for this user:
+        if "xblock_id_for_anonymous_user" not in current_request.session:
+            new_id = f"anon{uuid4().hex[:20]}"
+            current_request.session["xblock_id_for_anonymous_user"] = new_id
+        return current_request.session["xblock_id_for_anonymous_user"]
+    else:
+        raise RuntimeError("Cannot get a user ID for an anonymous user outside of an HTTP request context.")
